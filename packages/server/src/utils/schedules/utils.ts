@@ -9,9 +9,43 @@ import {
 } from "@dokploy/server/services/deployment";
 import { findScheduleById } from "@dokploy/server/services/schedule";
 import { scheduledJobs, scheduleJob as scheduleJobNode } from "node-schedule";
+import { quote } from "shell-quote";
 import { getComposeContainer, getServiceContainer } from "../docker/utils";
 import { execAsyncRemote } from "../process/execAsync";
 import { spawnAsync } from "../process/spawnAsync";
+
+// Allowlist of permitted shell types
+const ALLOWED_SHELL_TYPES = ["sh", "bash", "ash", "dash"];
+
+/**
+ * Validates that the shell type is in the allowlist
+ */
+function validateShellType(shellType: string): void {
+	if (!ALLOWED_SHELL_TYPES.includes(shellType)) {
+		throw new Error(
+			`Invalid shell type: ${shellType}. Allowed types: ${ALLOWED_SHELL_TYPES.join(", ")}`,
+		);
+	}
+}
+
+/**
+ * Validates that the container ID is a valid Docker container ID format
+ * Docker container IDs are 64-character hexadecimal strings, but shortened versions (12 chars) are also common
+ */
+function validateContainerId(containerId: string): void {
+	if (!containerId || !/^[a-f0-9]{12,64}$/i.test(containerId)) {
+		throw new Error(`Invalid container ID: ${containerId}`);
+	}
+}
+
+/**
+ * Validates that the command is not empty
+ */
+function validateCommand(command: string): void {
+	if (!command || command.trim().length === 0) {
+		throw new Error("Command cannot be empty");
+	}
+}
 
 export const scheduleJob = (schedule: Schedule) => {
 	const { cronExpression, scheduleId, timezone } = schedule;
@@ -71,18 +105,30 @@ export const runCommand = async (scheduleId: string) => {
 			serverId = compose.serverId || "";
 		}
 
+		// Validate inputs to prevent command injection
+		validateContainerId(containerId);
+		validateShellType(shellType);
+		validateCommand(command);
+
+		// Use shell-quote to safely escape the command
+		const escapedCommand = quote([command]);
+
 		if (serverId) {
 			try {
+				// Use shell-quote to safely escape all parameters including containerId and shellType
+				const escapedContainerId = quote([containerId]);
+				const escapedShellType = quote([shellType]);
+				const escapedLogPath = quote([deployment.logPath]);
 				await execAsyncRemote(
 					serverId,
 					`
 					set -e
-					echo "Running command: docker exec ${containerId} ${shellType} -c '${command}'" >> ${deployment.logPath};
-					docker exec ${containerId} ${shellType} -c '${command}' >> ${deployment.logPath} 2>> ${deployment.logPath} || { 
-						echo "❌ Command failed" >> ${deployment.logPath};
+					echo "Running command: docker exec ${escapedContainerId} ${escapedShellType} -c ${escapedCommand}" >> ${escapedLogPath};
+					docker exec ${escapedContainerId} ${escapedShellType} -c ${escapedCommand} >> ${escapedLogPath} 2>> ${escapedLogPath} || { 
+						echo "❌ Command failed" >> ${escapedLogPath};
 						exit 1;
 					}
-					echo "✅ Command executed successfully" >> ${deployment.logPath};
+					echo "✅ Command executed successfully" >> ${escapedLogPath};
 					`,
 				);
 			} catch (error) {
@@ -93,9 +139,15 @@ export const runCommand = async (scheduleId: string) => {
 			const writeStream = createWriteStream(deployment.logPath, { flags: "a" });
 
 			try {
+				// Use escaped values for logging
+				const escapedContainerId = quote([containerId]);
+				const escapedShellType = quote([shellType]);
 				writeStream.write(
-					`docker exec ${containerId} ${shellType} -c ${command}\n`,
+					`docker exec ${escapedContainerId} ${escapedShellType} -c ${escapedCommand}\n`,
 				);
+				// spawnAsync uses an array of arguments, which is inherently safe from shell injection
+				// Each argument is passed separately to the process, not through shell interpolation
+				// The original unescaped command is safe here because it's not passed through a shell
 				await spawnAsync(
 					"docker",
 					["exec", containerId, shellType, "-c", command],
@@ -123,9 +175,19 @@ export const runCommand = async (scheduleId: string) => {
 			const { SCHEDULES_PATH } = paths();
 			const fullPath = path.join(SCHEDULES_PATH, appName || "");
 
+			// Validate that the script exists within the expected directory
+			const scriptPath = path.join(fullPath, "script.sh");
+			const fs = await import("node:fs/promises");
+			try {
+				await fs.access(scriptPath);
+			} catch {
+				throw new Error(`Script not found at expected location: ${scriptPath}`);
+			}
+
+			// Use absolute path to avoid path traversal
 			await spawnAsync(
 				"bash",
-				["-c", "./script.sh"],
+				[scriptPath],
 				async (data) => {
 					if (writeStream.writable) {
 						// we need to extract the PID and Schedule ID from the data
@@ -151,14 +213,29 @@ export const runCommand = async (scheduleId: string) => {
 		try {
 			const { SCHEDULES_PATH } = paths(true);
 			const fullPath = path.join(SCHEDULES_PATH, appName || "");
+
+			// Validate that the script exists within the expected directory
+			const scriptPath = path.join(fullPath, "script.sh");
+
+			// Note: For remote servers, we cannot validate file existence locally
+			// The validation will happen at execution time on the remote server
+			// Ensure path is properly escaped to prevent injection
+
+			// Use shell-quote to escape all parameters
+			const escapedLogPath = quote([deployment.logPath]);
+			const escapedScriptPath = quote([scriptPath]);
 			const command = `
 				set -e
-				echo "Running script" >> ${deployment.logPath};
-				bash -c ${fullPath}/script.sh 2>&1 | tee -a ${deployment.logPath} || { 
-					echo "❌ Command failed" >> ${deployment.logPath};
+				if [ ! -f ${escapedScriptPath} ]; then
+					echo "❌ Script not found at ${escapedScriptPath}" >> ${escapedLogPath};
+					exit 1;
+				fi
+				echo "Running script" >> ${escapedLogPath};
+				bash ${escapedScriptPath} 2>&1 | tee -a ${escapedLogPath} || { 
+					echo "❌ Command failed" >> ${escapedLogPath};
 					exit 1;
 				  }
-				echo "✅ Command executed successfully" >> ${deployment.logPath};
+				echo "✅ Command executed successfully" >> ${escapedLogPath};
 			`;
 			await execAsyncRemote(serverId, command, async (data) => {
 				// we need to extract the PID and Schedule ID from the data
