@@ -109,7 +109,7 @@ export const containerExists = async (containerName: string) => {
 
 export const stopService = async (appName: string) => {
 	try {
-		await execAsync(`docker service scale ${appName}=0 `);
+		await execAsync(`docker service scale ${quote([appName])}=0 `);
 	} catch (error) {
 		console.error(error);
 		return error;
@@ -118,7 +118,7 @@ export const stopService = async (appName: string) => {
 
 export const stopServiceRemote = async (serverId: string, appName: string) => {
 	try {
-		await execAsyncRemote(serverId, `docker service scale ${appName}=0 `);
+		await execAsyncRemote(serverId, `docker service scale ${quote([appName])}=0 `);
 	} catch (error) {
 		console.error(error);
 		return error;
@@ -319,7 +319,7 @@ export const cleanupAllBackground = async (serverId?: string) => {
 
 export const startService = async (appName: string) => {
 	try {
-		await execAsync(`docker service scale ${appName}=1 `);
+		await execAsync(`docker service scale ${quote([appName])}=1 `);
 	} catch (error) {
 		console.error(error);
 		throw error;
@@ -328,7 +328,7 @@ export const startService = async (appName: string) => {
 
 export const startServiceRemote = async (serverId: string, appName: string) => {
 	try {
-		await execAsyncRemote(serverId, `docker service scale ${appName}=1 `);
+		await execAsyncRemote(serverId, `docker service scale ${quote([appName])}=1 `);
 	} catch (error) {
 		console.error(error);
 		throw error;
