@@ -2,6 +2,7 @@ import { logger } from "@dokploy/server/lib/logger";
 import type { BackupSchedule } from "@dokploy/server/services/backup";
 import type { Destination } from "@dokploy/server/services/destination";
 import { scheduledJobs, scheduleJob } from "node-schedule";
+import { quote } from "shell-quote";
 import { keepLatestNBackups } from ".";
 import { runComposeBackup } from "./compose";
 import { runMariadbBackup } from "./mariadb";
@@ -9,6 +10,14 @@ import { runMongoBackup } from "./mongo";
 import { runMySqlBackup } from "./mysql";
 import { runPostgresBackup } from "./postgres";
 import { runWebServerBackup } from "./web-server";
+
+/**
+ * Escape a string for safe use in a bash -c double-quoted context
+ * Escapes: $, `, \, ", and newlines
+ */
+const escapeBashString = (str: string): string => {
+	return str.replace(/[\$`\\"]/g, '\\$&').replace(/\n/g, '\\n');
+};
 
 export const scheduleBackup = (backup: BackupSchedule) => {
 	const {
@@ -81,7 +90,9 @@ export const getPostgresBackupCommand = (
 	database: string,
 	databaseUser: string,
 ) => {
-	return `docker exec -i $CONTAINER_ID bash -c "set -o pipefail; pg_dump -Fc --no-acl --no-owner -h localhost -U ${databaseUser} --no-password '${database}' | gzip"`;
+	const escapedUser = escapeBashString(databaseUser);
+	const escapedDb = escapeBashString(database);
+	return `docker exec -i $CONTAINER_ID bash -c "set -o pipefail; pg_dump -Fc --no-acl --no-owner -h localhost -U ${escapedUser} --no-password ${escapedDb} | gzip"`;
 };
 
 export const getMariadbBackupCommand = (
@@ -89,14 +100,19 @@ export const getMariadbBackupCommand = (
 	databaseUser: string,
 	databasePassword: string,
 ) => {
-	return `docker exec -i $CONTAINER_ID bash -c "set -o pipefail; mariadb-dump --user='${databaseUser}' --password='${databasePassword}' --single-transaction --quick --databases ${database} | gzip"`;
+	const escapedUser = escapeBashString(databaseUser);
+	const escapedPass = escapeBashString(databasePassword);
+	const escapedDb = escapeBashString(database);
+	return `docker exec -i $CONTAINER_ID bash -c "set -o pipefail; mariadb-dump --user=${escapedUser} --password=${escapedPass} --single-transaction --quick --databases ${escapedDb} | gzip"`;
 };
 
 export const getMysqlBackupCommand = (
 	database: string,
 	databasePassword: string,
 ) => {
-	return `docker exec -i $CONTAINER_ID bash -c "set -o pipefail; mysqldump --default-character-set=utf8mb4 -u 'root' --password='${databasePassword}' --single-transaction --no-tablespaces --quick '${database}' | gzip"`;
+	const escapedPass = escapeBashString(databasePassword);
+	const escapedDb = escapeBashString(database);
+	return `docker exec -i $CONTAINER_ID bash -c "set -o pipefail; mysqldump --default-character-set=utf8mb4 -u 'root' --password=${escapedPass} --single-transaction --no-tablespaces --quick ${escapedDb} | gzip"`;
 };
 
 export const getMongoBackupCommand = (
@@ -104,11 +120,16 @@ export const getMongoBackupCommand = (
 	databaseUser: string,
 	databasePassword: string,
 ) => {
-	return `docker exec -i $CONTAINER_ID bash -c "set -o pipefail; mongodump -d '${database}' -u '${databaseUser}' -p '${databasePassword}' --archive --authenticationDatabase admin --gzip"`;
+	const escapedDb = escapeBashString(database);
+	const escapedUser = escapeBashString(databaseUser);
+	const escapedPass = escapeBashString(databasePassword);
+	return `docker exec -i $CONTAINER_ID bash -c "set -o pipefail; mongodump -d ${escapedDb} -u ${escapedUser} -p ${escapedPass} --archive --authenticationDatabase admin --gzip"`;
 };
 
 export const getServiceContainerCommand = (appName: string) => {
-	return `docker ps -q --filter "status=running" --filter "label=com.docker.swarm.service.name=${appName}" | head -n 1`;
+	// Escape appName for docker filter - just escape special chars that could break the command
+	const escapedAppName = appName.replace(/[\$`"\\]/g, '\\$&');
+	return `docker ps -q --filter "status=running" --filter "label=com.docker.swarm.service.name=${escapedAppName}" | head -n 1`;
 };
 
 export const getComposeContainerCommand = (
@@ -116,10 +137,13 @@ export const getComposeContainerCommand = (
 	serviceName: string,
 	composeType: "stack" | "docker-compose" | undefined,
 ) => {
+	// Escape for docker filter - just escape special chars that could break the command
+	const escapedAppName = appName.replace(/[\$`"\\]/g, '\\$&');
+	const escapedServiceName = serviceName.replace(/[\$`"\\]/g, '\\$&');
 	if (composeType === "stack") {
-		return `docker ps -q --filter "status=running" --filter "label=com.docker.stack.namespace=${appName}" --filter "label=com.docker.swarm.service.name=${appName}_${serviceName}" | head -n 1`;
+		return `docker ps -q --filter "status=running" --filter "label=com.docker.stack.namespace=${escapedAppName}" --filter "label=com.docker.swarm.service.name=${escapedAppName}_${escapedServiceName}" | head -n 1`;
 	}
-	return `docker ps -q --filter "status=running" --filter "label=com.docker.compose.project=${appName}" --filter "label=com.docker.compose.service=${serviceName}" | head -n 1`;
+	return `docker ps -q --filter "status=running" --filter "label=com.docker.compose.project=${escapedAppName}" --filter "label=com.docker.compose.service=${escapedServiceName}" | head -n 1`;
 };
 
 const getContainerSearchCommand = (backup: BackupSchedule) => {

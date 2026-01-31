@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import bcrypt from "bcrypt";
 
 export const generateRandomPassword = async () => {
@@ -8,9 +9,8 @@ export const generateRandomPassword = async () => {
 
 	let randomPassword = "";
 	for (let i = 0; i < passwordLength; i++) {
-		randomPassword += characters.charAt(
-			Math.floor(Math.random() * characters.length),
-		);
+		const randomIndex = crypto.randomInt(0, characters.length);
+		randomPassword += characters.charAt(randomIndex);
 	}
 
 	const saltRounds = 10;
